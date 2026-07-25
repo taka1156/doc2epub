@@ -1,0 +1,20 @@
+{
+  "name": "doc2epub",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "sandbox",
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "yarn install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "MS-CEINTL.vscode-language-pack-ja"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.cwd": "${containerWorkspaceFolder}",
+        "editor.formatOnSave": true,
+        "files.insertFinalNewline": true
+      }
+    }
+  }
+}

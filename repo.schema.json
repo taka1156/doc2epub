@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "md2honkit repo.json",
+  "description": "変換対象リポジトリの定義。options 配下のキーは md2honkit CLI のフラグ名と 1:1 で対応します。",
+  "type": "object",
+  "required": ["books"],
+  "properties": {
+    "defaults": {
+      "$ref": "#/definitions/options",
+      "description": "全 book 共通の既定オプション。各 book の options で上書きされます。"
+    },
+    "books": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/book" }
+    }
+  },
+  "definitions": {
+    "book": {
+      "type": "object",
+      "required": ["name", "repo", "options"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "出力ファイル名の元になる識別子。<name>.epub として dist に配置されます。",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "repo": {
+          "type": "string",
+          "description": "クローン元のGit URL。ローカルディレクトリのパスも指定できます。"
+        },
+        "ref": {
+          "type": "string",
+          "description": "チェックアウトするブランチ・タグ・コミットハッシュ。省略時はデフォルトブランチ。"
+        },
+        "options": { "$ref": "#/definitions/options" }
+      },
+      "additionalProperties": false
+    },
+    "options": {
+      "type": "object",
+      "description": "md2honkit の CLI オプション。ここに書いたキーは --<キー> <値> としてそのまま渡されます。",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["vitepress", "docusaurus"],
+          "description": "ドキュメントジェネレータの種類。"
+        },
+        "input": {
+          "type": "string",
+          "description": "Markdown のあるディレクトリ。リポジトリルートからの相対パス。"
+        },
+        "title": { "type": "string", "description": "本のタイトル。" },
+        "author": { "type": "string", "description": "著者名。" },
+        "lang": { "type": "string", "description": "言語コード (例: ja, en)。", "default": "ja" },
+        "config": {
+          "type": "string",
+          "description": "VitePress の config.mjs のパス。リポジトリルートからの相対パス。"
+        },
+        "sidebars": {
+          "type": "string",
+          "description": "Docusaurus の sidebars.js のパス。リポジトリルートからの相対パス。"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

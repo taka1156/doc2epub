@@ -1,0 +1,138 @@
+name: Build EPUB
+
+on:
+  # repo.json や変換スクリプトが更新されたら自動ビルド
+  push:
+    branches: [main]
+    paths:
+      - "repo.json"
+      - "md2honkit.mjs"
+      - "build-all.mjs"
+      - "package.json"
+      - ".github/workflows/build-epub.yml"
+  # 毎週月曜 3:00 JST (= 日曜 18:00 UTC) に定期ビルドして最新ドキュメントを取り込む
+  schedule:
+    - cron: "0 18 * * 0"
+  # 手動実行。特定の book だけビルドすることもできる
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "ビルド対象の book 名 (カンマ区切り / 空なら全件)"
+        required: false
+        default: ""
+
+# dist ブランチへ push するために書き込み権限が必要
+permissions:
+  contents: write
+
+# 同時実行を抑止 (dist ブランチへの push が競合するのを防ぐ)
+concurrency:
+  group: build-epub
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "yarn"
+
+      - name: 依存関係をインストール
+        run: |
+          yarn install --frozen-lockfile || yarn install
+
+      - name: Calibre をインストール (ebook-convert が epub 生成に必須)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-xinerama0 libnss3 libxcomposite1 \
+            libxdamage1 libxrandr2 libasound2t64 fonts-noto-cjk xz-utils
+          # 公式インストーラで Calibre を導入
+          sudo -v
+          wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh \
+            | sudo sh /dev/stdin
+          ebook-convert --version
+
+      - name: EPUB をビルド
+        run: |
+          node build-all.mjs \
+            --config repo.json \
+            --dist ./dist \
+            --work ./.work \
+            ${{ github.event.inputs.only && format('--only {0}', github.event.inputs.only) || '' }}
+        env:
+          # プライベートリポジトリを対象にする場合はここでトークンを渡す
+          # (repo.json の repo に https://x-access-token:${GH_TOKEN}@github.com/... と書く運用も可)
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ビルド成果物を確認
+        run: |
+          ls -lh ./dist
+          cat ./dist/manifest.json
+
+      # ワークフロー実行画面からもダウンロードできるように artifact としても保存
+      - name: Artifact としてアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: epub
+          path: dist/*.epub
+          retention-days: 30
+
+      - name: dist ブランチへ配置
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # dist ブランチを取得。存在しなければ orphan ブランチとして新規作成する
+          if git ls-remote --exit-code --heads origin dist; then
+            git fetch origin dist --depth 1
+            git worktree add ../dist-branch origin/dist
+            cd ../dist-branch
+            git checkout -B dist
+          else
+            git worktree add --detach ../dist-branch
+            cd ../dist-branch
+            git checkout --orphan dist
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          # 既存の epub を一旦削除してから最新版を配置 (repo.json から消した本を残さないため)
+          rm -f ./*.epub ./manifest.json
+          cp "$GITHUB_WORKSPACE"/dist/*.epub ./ 2>/dev/null || true
+          cp "$GITHUB_WORKSPACE"/dist/manifest.json ./
+
+          # ダウンロード用の一覧 README を自動生成
+          {
+            echo "# EPUB ダウンロード"
+            echo
+            echo "\`repo.json\` に定義されたドキュメントを EPUB に変換したものです。"
+            echo
+            echo "最終更新: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo
+            echo "| 書籍 | ファイル |"
+            echo "| --- | --- |"
+            for f in ./*.epub; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              echo "| ${base%.epub} | [$base]($base) |"
+            done
+          } > README.md
+
+          git add -A
+          if git diff --staged --quiet; then
+            echo "変更がないため commit をスキップします。"
+          else
+            git commit -m "build: EPUB を更新 (${GITHUB_SHA::7})"
+            git push origin dist
+          fi

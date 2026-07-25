@@ -1,0 +1,6 @@
+services:
+    sandbox:
+      build: .
+      tty: true
+      volumes:
+        - ../:/workspace

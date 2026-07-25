@@ -1,0 +1,45 @@
+{
+  "$schema": "./repo.schema.json",
+  "defaults": {
+    "lang": "ja"
+  },
+  "books": [
+    {
+      "name": "vitepress-docs",
+      "repo": "https://github.com/vuejs/vitepress.git",
+      "ref": "main",
+      "options": {
+        "type": "vitepress",
+        "input": "docs/ja",
+        "title": "VitePress Documentation",
+        "author": "VitePress Contributors",
+        "lang": "ja"
+      }
+    },
+    {
+      "name": "vite-docs",
+      "repo": "https://github.com/vitejs/docs-ja",
+      "ref": "main",
+      "options": {
+        "type": "vitepress",
+        "input": "guide",
+        "title": "Vite Documentation",
+        "author": "Vite Contributors",
+        "lang": "ja"
+      }
+    },
+    {
+      "name": "typescript-book",
+      "repo": "https://github.com/yytypescript/book",
+      "ref": "master",
+      "options": {
+        "type": "docusaurus",
+        "input": "docs",
+        "sidebars": "sidebars.js",
+        "title": "TypeScript Documentation",
+        "author": "yytypescript",
+        "lang": "ja"
+      }
+    }
+  ]
+}
