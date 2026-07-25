@@ -105,42 +105,259 @@ if (!fs.existsSync(INPUT_DIR)) {
  * ]
  */
 async function loadVitepressSidebar() {
+  // 探索順: 明示指定 → <input>/.vitepress/ → <input>/config.ts → <inputの親>/.vitepress/
   const configPath = args.config
     ? path.resolve(args.config)
-    : path.join(INPUT_DIR, ".vitepress", "config.mjs");
+    : [
+        path.join(INPUT_DIR, ".vitepress", "config.mjs"),
+        path.join(INPUT_DIR, ".vitepress", "config.ts"),
+        path.join(INPUT_DIR, ".vitepress", "config.js"),
+        path.join(INPUT_DIR, "config.ts"),          // docs/ja/config.ts のような配置
+        path.join(INPUT_DIR, "config.mjs"),
+        path.join(INPUT_DIR, "config.js"),
+        path.join(INPUT_DIR, "..", ".vitepress", "config.mjs"),  // docs/.vitepress/
+        path.join(INPUT_DIR, "..", ".vitepress", "config.ts"),
+      ].find((p) => fs.existsSync(p));
 
-  if (!fs.existsSync(configPath)) {
-    console.warn(`[警告] VitePress設定が見つかりません (${configPath})。自動走査モードにフォールバックします。`);
+  if (!configPath) {
+    console.warn("[警告] VitePress設定が見つかりません。自動走査モードにフォールバックします。");
     return null;
   }
 
+  // input ディレクトリに相当する URL プレフィックスを推定する。
+  // 例: input=docs/ja → リンク /ja/guide/foo → ja/guide/foo → guide/foo (INPUT_DIRからの相対)
+  // 例: input=docs    → リンク /guide/foo    → guide/foo
+  // 例: input=.       → リンク /guide/foo    → guide/foo
+  const inputBaseName = path.basename(INPUT_DIR); // "ja", "en", "docs" など
+  const inputParentName = path.basename(path.dirname(INPUT_DIR)); // "docs" など
+
+  // "/ja/guide/foo" → "guide/foo.md" のように INPUT_DIR からの相対パスに変換する
+  function linkToFile(link, base = "") {
+    // base: sidebar の base 属性 ("/ja/reference/" など)
+    let full = link.startsWith("/") ? link : `${base}${link}`;
+    full = full.replace(/\/$/, "/index");
+    // 先頭の /lang/ または /docs/lang/ を除去して INPUT_DIR 起点にする
+    // 例: /ja/guide/foo → guide/foo, /guide/foo → guide/foo
+    let rel = full.replace(/^\//, "");
+    // inputBaseName が "ja" のとき、先頭の "ja/" を除去する
+    if (inputBaseName && rel.startsWith(inputBaseName + "/")) {
+      rel = rel.slice(inputBaseName.length + 1);
+    }
+    // "docs/ja/" のような二重プレフィックスも除去する
+    const twoLevel = `${inputParentName}/${inputBaseName}/`;
+    if (rel.startsWith(twoLevel)) rel = rel.slice(twoLevel.length);
+
+    return rel.endsWith(".md") ? rel : `${rel}.md`;
+  }
+
+  // 解決したパスが INPUT_DIR に存在しない場合、サブディレクトリを再帰的に探す
+  function resolveToActualFile(relFile) {
+    if (fs.existsSync(path.join(INPUT_DIR, relFile))) return relFile;
+    const baseName = path.basename(relFile);
+    const searchIn = (dir, depth = 0) => {
+      if (depth > 4) return null;
+      try {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            const found = searchIn(path.join(dir, entry.name), depth + 1);
+            if (found) return found;
+          } else if (entry.name === baseName) {
+            return path.relative(INPUT_DIR, path.join(dir, entry.name)).split(path.sep).join("/");
+          }
+        }
+      } catch { /* 読めないディレクトリはスキップ */ }
+      return null;
+    };
+    return searchIn(INPUT_DIR) ?? relFile;
+  }
+
+  if (!configPath) {
+    console.warn("[警告] VitePress設定が見つかりません。自動走査モードにフォールバックします。");
+    return null;
+  }
+
+  // .mjs / .js は動的インポートで読む
+  if (!configPath.endsWith(".ts")) {
+    try {
+      const mod = await import("file://" + configPath);
+      const config = mod.default ?? mod;
+      const sidebar = config?.themeConfig?.sidebar;
+      if (!sidebar) {
+        console.warn("[警告] themeConfig.sidebar が見つかりません。自動走査モードにフォールバックします。");
+        return null;
+      }
+      const rawItems = Array.isArray(sidebar) ? sidebar : Object.values(sidebar).flat();
+      function normalize(items, base = "") {
+        return items.map((item) => {
+          const itemBase = item.base ?? base;
+          if (item.items) return { title: item.text || item.title, children: normalize(item.items, itemBase) };
+          const file = linkToFile(item.link || item.path || "", itemBase);
+          return { title: item.text || item.title || file, file };
+        });
+      }
+      return normalize(rawItems);
+    } catch (e) {
+      console.warn(`[警告] VitePress設定の読み込みに失敗しました: ${e.message}`);
+      return null;
+    }
+  }
+
+  // .ts は実行できないため、テキストとして読んで link: '...' の出現順を抽出する
+  console.log(`[情報] TypeScript設定を静的解析して sidebar 順を取得します: ${configPath}`);
   try {
-    const mod = await import("file://" + configPath);
-    const config = mod.default ?? mod;
-    const sidebar = config?.themeConfig?.sidebar;
-    if (!sidebar) {
-      console.warn("[警告] themeConfig.sidebar が見つかりません。自動走査モードにフォールバックします。");
+    const src = fs.readFileSync(configPath, "utf-8");
+
+    // sidebar: { '/path/': [...] } の値部分を切り出す
+    const sidebarMatch = src.match(/sidebar\s*:\s*(\{[\s\S]*)/);
+    if (!sidebarMatch) {
+      console.warn("[警告] sidebar 定義が見つかりません。自動走査モードにフォールバックします。");
       return null;
     }
 
-    // sidebar は配列 か { "/path/": [...] } の形式がある
-    const rawItems = Array.isArray(sidebar) ? sidebar : Object.values(sidebar).flat();
-
-    function normalize(items) {
-      return items.map((item) => {
-        if (item.items) {
-          return { title: item.text || item.title, children: normalize(item.items) };
-        }
-        let link = item.link || item.path || "";
-        link = link.replace(/^\//, "").replace(/\/$/, "/index");
-        const file = link.endsWith(".md") ? link : `${link}.md`;
-        return { title: item.text || item.title || file, file };
-      });
+    // text: '...' と link: '...' のペアを出現順に収集する
+    const sidebarSrc = sidebarMatch[1];
+    const entries = [];
+    const itemRe = /\btext\s*:\s*(?:'([^']*)'|"([^"]*)"|(`.+?`))[\s\S]*?\blink\s*:\s*(?:'([^']*)'|"([^"]*)")/g;
+    let m;
+    while ((m = itemRe.exec(sidebarSrc)) !== null) {
+      const text = (m[1] ?? m[2] ?? m[3] ?? "").replace(/^`|`$/g, "").trim();
+      const link = (m[4] ?? m[5] ?? "").replace(/^\//, "").replace(/\/$/, "/index").trim();
+      if (!link || link.startsWith("http")) continue;
+      // グループ見出し (items を持つ) かページかを判断: link が / で終わっていたらグループ見出し
+      const file = link.endsWith(".md") ? link : `${link}.md`;
+      entries.push({ text, file });
     }
 
-    return normalize(rawItems);
+    // sidebar: { '/path/': [ { text, items: [...] } ] } の構造を解析する
+    // セクション { text, items } → ページ { text, link } の2段階で抽出する
+    const result = [];
+
+    // sidebar の各キー ('/guide/', '/config/' など) の items を順番に処理する
+    // セクション見出し ({ text, items }) とページ ({ text, link }) を区別する:
+    //   - items を持つ = セクション見出し
+    //   - link を持つ = ページ
+    //
+    // TypeScript の template literal (`...`) も含めて text を取る正規表現
+    const sectionRe = /\{\s*text\s*:\s*(?:'([^']*)'|"([^"]*)"|(`.+?`))\s*,\s*(?:collapsed\s*:\s*\w+\s*,\s*)?items\s*:\s*\[/g;
+    const pageRe = /\{\s*text\s*:\s*(?:'([^']*)'|"([^"]*)"|(`.+?`))(?:[\s\S]*?)\blink\s*:\s*'([^']*)'/g;
+
+    // 全ページを出現順に取得。base 属性も考慮する
+    const allPages = [];
+    // base: '/ja/guide/' のような属性と、それが属するオブジェクトの閉じ括弧位置を取る
+    // 簡易実装: base 属性の次の '}' までの範囲でのみ有効とする
+    const baseRe = /\bbase\s*:\s*'([^']*)'/g;
+    const baseRanges = []; // { base, start, end }
+    let bm;
+    while ((bm = baseRe.exec(src)) !== null) {
+      const base = bm[1];
+      const start = bm.index;
+      // この base が属するオブジェクトの閉じ括弧を探す（簡易: 次の独立した '}' まで）
+      let depth = 0, end = start;
+      for (let i = start; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+          if (depth <= 0) { end = i; break; }
+          depth--;
+        }
+      }
+      baseRanges.push({ base, start, end: end || src.length });
+    }
+
+    const getBase = (pos) => {
+      // pos の時点で有効な base: 絶対パスの場合のみ base を適用する
+      // (相対パスの場合は linkToFile が nearestBase と合成するので、外側の base は無視)
+      const applicable = baseRanges.filter((r) => pos >= r.start && pos <= r.end);
+      return applicable[applicable.length - 1]?.base ?? "";
+    };
+
+    // sidebar: 定義の後のリンクのみを対象にする (nav のリンクを除外するため)
+    const sidebarMatch2 = src.match(/\bsidebar\s*:/);
+    const sidebarStart = sidebarMatch2 ? sidebarMatch2.index : 0;
+
+    let pm;
+    while ((pm = pageRe.exec(src)) !== null) {
+      if (pm.index < sidebarStart) continue; // sidebar より前 (nav など) は除外
+      const text = (pm[1] ?? pm[2] ?? pm[3] ?? "").replace(/^`|`$/g, "").trim();
+      const rawLink = pm[4];
+      if (rawLink.startsWith("http")) continue;
+      const nearestBase = getBase(pm.index);
+      const file = resolveToActualFile(linkToFile(rawLink, nearestBase));
+      if (!file) continue;
+      allPages.push({ text, file, pos: pm.index });
+    }
+
+    // セクション見出しの位置も取得して、各ページがどのセクションに属するかを判定する
+    const sections = [];
+    let sm;
+    while ((sm = sectionRe.exec(src)) !== null) {
+      if (sm.index < sidebarStart) continue;
+      const text = (sm[1] ?? sm[2] ?? sm[3] ?? "").replace(/^`|`$/g, "").trim();
+      sections.push({ text, pos: sm.index });
+    }
+
+    if (allPages.length === 0) {
+      console.warn("[警告] sidebar からリンクを抽出できませんでした。自動走査モードにフォールバックします。");
+      return null;
+    }
+
+    // セクションが無ければフラットに返す
+    if (sections.length === 0) {
+      console.log(`[情報] sidebar から ${allPages.length} 件のリンクを取得しました。`);
+      return allPages.map(({ text, file }) => ({ title: text, file }));
+    }
+
+    // 各セクションの終端を次のセクションの開始位置とみなして、ページを振り分ける
+    const grouped = [];
+    for (let i = 0; i < sections.length; i++) {
+      const start = sections[i].pos;
+      const end = sections[i + 1]?.pos ?? Infinity;
+      const children = allPages
+        .filter((p) => p.pos >= start && p.pos < end)
+        .map(({ text, file }) => ({ title: text, file }));
+      if (children.length > 0) {
+        grouped.push({ title: sections[i].text, children });
+      }
+    }
+
+    // セクションに入らなかったページ (先頭の孤立ページ) を先頭に追加する
+    const sectionStart = sections[0]?.pos ?? 0;
+    const orphans = allPages
+      .filter((p) => p.pos < sectionStart)
+      .map(({ text, file }) => ({ title: text, file }));
+
+    // セクション先頭ページを表紙として昇格させる。
+    // パターンA: セクション直前の allPage が index.md (イントロダクション -> /guide/ の形)
+    // パターンB: children の先頭が index.md
+    const orphanFiles = new Set(orphans.map((o) => o.file));
+    for (let gi = 0; gi < grouped.length; gi++) {
+      const node = grouped[gi];
+      if (node.file) continue;
+
+      // children の先頭が index.md ならそのセクションの表紙にする
+      if (node.children.length > 0) {
+        const first = node.children[0];
+        if (/(\/|^)index\.mdx?$/.test(first.file)) {
+          node.file = first.file;
+          node.children = node.children.slice(1);
+          orphanFiles.delete(first.file);
+        }
+      }
+    }
+
+    const finalOrphans = orphans.filter((o) => orphanFiles.has(o.file));
+
+    // セクション内のページと重複する孤立ページを除去する
+    const sectionFiles = new Set(
+      grouped.flatMap((g) => [g.file, ...g.children.map((c) => c.file)]).filter(Boolean)
+    );
+    const deduped = finalOrphans.filter((o) => !sectionFiles.has(o.file));
+
+    const finalResult = [...deduped, ...grouped];
+
+    console.log(`[情報] sidebar から ${allPages.length} 件のリンクを取得しました。`);
+    return finalResult;
   } catch (e) {
-    console.warn(`[警告] VitePress設定の読み込みに失敗しました: ${e.message}`);
+    console.warn(`[警告] TypeScript設定の解析に失敗しました: ${e.message}`);
     return null;
   }
 }
@@ -938,7 +1155,17 @@ function buildSummary(tree, depth = 0) {
   const indent = "  ".repeat(depth);
   for (const node of tree) {
     if (node.children) {
-      out += `${indent}* ${node.title}\n`;
+      if (node.file) {
+        // セクション見出し自体にページが紐付いている場合はリンク付きで出力する
+        const pages = writeConvertedFile(node.file);
+        if (pages.length > 0) {
+          out += `${indent}* [${node.title}](${pages[0].file})\n`;
+        } else {
+          out += `${indent}* ${node.title}\n`;
+        }
+      } else {
+        out += `${indent}* ${node.title}\n`;
+      }
       out += buildSummary(node.children, depth + 1);
     } else {
       const pages = writeConvertedFile(node.file);
