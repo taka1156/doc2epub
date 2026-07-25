@@ -22,7 +22,9 @@
       "ref": "main",
       "options": {
         "type": "vitepress",
-        "input": "guide",
+        "input": ".",
+        "no-svg": true,
+        "exclude": "README.md,CONTRIBUTING.md,blog/**,blog.md,team.md,live.md,acknowledgements.md",
         "title": "Vite Documentation",
         "author": "Vite Contributors",
         "lang": "ja"

@@ -74,7 +74,20 @@ const LANG = args.lang;
 // 既定を 30KB (EPUB換算で約180KB) とし、0 を指定すると分割を無効化する。
 const MAX_PAGE_BYTES =
   args["max-page-bytes"] === undefined ? 30000 : Number(args["max-page-bytes"]);
+// Kindle は SVG を表示できず、EPUB の検証でも弾かれやすいため除外できるようにする
+const NO_SVG = Boolean(args["no-svg"]);
+let droppedSvgCount = 0;
 let splitPageCount = 0;
+
+// 目次に含めないファイルのグロブ (カンマ区切り)。既定でリポジトリのメタ文書を除外する。
+const EXCLUDE_PATTERNS = (
+  typeof args.exclude === "string"
+    ? args.exclude
+    : "README.md,CONTRIBUTING.md,CODE_OF_CONDUCT.md,CHANGELOG.md,LICENSE.md,**/_*.md,**/_*.mdx"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 if (!fs.existsSync(INPUT_DIR)) {
   console.error(`エラー: 入力ディレクトリが見つかりません: ${INPUT_DIR}`);
@@ -185,7 +198,12 @@ function loadDocusaurusSidebar() {
 async function autoDiscover() {
   const files = await fg(["**/*.md", "**/*.mdx"], {
     cwd: INPUT_DIR,
-    ignore: ["**/node_modules/**", "**/.vitepress/**", "**/.docusaurus/**"],
+    ignore: [
+      "**/node_modules/**",
+      "**/.vitepress/**",
+      "**/.docusaurus/**",
+      ...EXCLUDE_PATTERNS,
+    ],
   });
   files.sort();
 
@@ -286,6 +304,11 @@ function processAssets(text, relFile) {
   const destDir = path.dirname(path.join(OUTPUT_DIR, toMdPath(relFile)));
 
   const handle = (ref) => {
+    const bare = String(ref).replace(/^<|>$/g, "").split(/[?#]/)[0];
+    if (NO_SVG && /\.svg$/i.test(bare)) {
+      droppedSvgCount++;
+      return null; // 見つからなかった扱いにして代替テキストへ落とす
+    }
     const abs = resolveAssetSource(ref, srcDir);
     if (!abs) return null;
     return copyAsset(abs, destDir);
@@ -578,7 +601,7 @@ function convertMarkdown(raw, relFile) {
   // フェンス付きコードブロック
   text = text.replace(/^(\s*)(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\s*\2[^\n]*$/gm, stashBlock);
   // インラインコード
-  text = text.replace(/(`+)(?:(?!\1)[\s\S])+?\1/g, stashBlock);
+  text = text.replace(/(`+)(?:(?!\1)[^\n])+\1/g, stashBlock);
 
   // Vue の <script setup> ブロックを削除
   text = text.replace(/<script\s+setup[^>]*>[\s\S]*?<\/script>/g, "");
@@ -616,12 +639,163 @@ function convertMarkdown(raw, relFile) {
     }
   );
   // 行頭以外に現れた残りを復元
-  text = text.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_, i) => stash[Number(i)]);
+  // 行頭以外に現れた残りを復元 (入れ子になる場合があるため繰り返す)
+  for (let i = 0; i < 10 && text.includes("\u0000CODEBLOCK"); i++) {
+    text = text.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (m, idx) => stash[Number(idx)] ?? m);
+  }
 
   // highlight.js が解釈できない言語IDを正規化する
   text = normalizeCodeFences(text);
 
   return text.trim() + "\n";
+}
+
+// ---------- 生成後の後処理 (EPUB 検証エラー対策) ----------
+// epubcheck / Amazon の変換で弾かれる要因を取り除く。
+//  - RSC-007: 本に含まれないページへのリンク (取り込み範囲を絞ると必ず発生する)
+//  - RSC-005: EPUB2 で許可されていない HTML5 要素 (details/button/audio/inline svg)
+//  - RSC-005: alt 属性の無い img
+
+let deadLinkCount = 0;
+let rewrittenLinkCount = 0;
+let strippedTagCount = 0;
+
+function listOutputPages(dir = OUTPUT_DIR, acc = []) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) listOutputPages(p, acc);
+    else if (e.name.endsWith(".md")) acc.push(p);
+  }
+  return acc;
+}
+
+function sanitizeHtmlForEpub(text) {
+  const before = text;
+
+  // <details><summary>X</summary> ... </details> → 見出し付きの通常テキスト
+  text = text.replace(/<summary[^>]*>([\s\S]*?)<\/summary>/gi, (_, inner) => `**${inner.trim()}**\n`);
+  text = text.replace(/<\/?details[^>]*>/gi, "");
+
+  // <button> は中身のテキストだけ残す
+  text = text.replace(/<button\b[^>]*>([\s\S]*?)<\/button>/gi, "$1");
+  text = text.replace(/<\/?button[^>]*>/gi, "");
+
+  // <audio> / <video> は EPUB2 では扱えないため丸ごと除去
+  text = text.replace(/<(audio|video)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+  text = text.replace(/<\/?(audio|video)[^>]*>/gi, "");
+
+  // インライン SVG は Kindle が解釈できず検証も通らないため除去
+  text = text.replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
+
+  // Vue の <template> ブロックは EPUB2 では不許可。中身ごと除去する
+  text = text.replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, "");
+  text = text.replace(/<\/?template[^>]*>/gi, "");
+
+  // カスタム要素 (<svg-image>, <my-widget> など。HTML仕様上ハイフンを含む) を除去し
+  // 中身のテキストだけ残す。Vue/VitePress のコンポーネントがこの形で残るため。
+  text = text.replace(/<([a-z][a-z0-9]*-[a-z0-9-]*)\b[^>]*\/>/gi, "");
+  text = text.replace(/<([a-z][a-z0-9]*-[a-z0-9-]*)\b[^>]*>([\s\S]*?)<\/\1>/gi, "$2");
+  text = text.replace(/<\/?[a-z][a-z0-9]*-[a-z0-9-]*\b[^>]*>/gi, "");
+
+  // alt の無い img に空の alt を補う (EPUB2 では必須)
+  text = text.replace(/<img\b([^>]*?)\/?>/gi, (tag, attrs) => {
+    if (/\balt\s*=/.test(attrs)) return tag;
+    return `<img${attrs} alt="" />`;
+  });
+
+  if (text !== before) strippedTagCount++;
+  return text;
+}
+
+/**
+ * リンク先をブック内のページとして解決する。
+ * VitePress / Docusaurus は "/guide/foo.html" のようなルート絶対リンクを多用するため、
+ * これを出力ルート基準で解決し、.html / 拡張子なしも .md に対応付ける。
+ * @returns 解決できた場合はページからの相対パス、できなければ null
+ */
+function resolvePageTarget(target, pageDir) {
+  const [, bare, suffix = ""] = target.match(/^([^?#]*)([?#].*)?$/) || [];
+  if (!bare) return null;
+
+  let decoded;
+  try {
+    decoded = decodeURIComponent(bare);
+  } catch {
+    decoded = bare;
+  }
+
+  const base = decoded.startsWith("/")
+    ? path.join(OUTPUT_DIR, decoded)
+    : path.resolve(pageDir, decoded);
+
+  const candidates = [
+    base,
+    base.replace(/\.html?$/i, ".md"),
+    `${base}.md`,
+    path.join(base, "index.md"),
+    path.join(base, "README.md"),
+  ];
+
+  for (const c of candidates) {
+    if (fs.existsSync(c) && fs.statSync(c).isFile() && c.endsWith(".md")) {
+      const rel = path.relative(pageDir, c).split(path.sep).join("/");
+      return `${rel || path.basename(c)}${suffix}`;
+    }
+  }
+  return null;
+}
+
+/** 本に含まれないページへのリンクを解除する (リンク文字列は残す) */
+function unlinkDeadLinks(text, pagePath) {
+  const dir = path.dirname(pagePath);
+
+  return text.replace(
+    /(^|[^!])\[((?:[^\[\]]|\[[^\]]*\])*)\]\(\s*(<[^>]+>|[^)\s]+)((?:\s+["'][^"']*["'])?)\s*\)/g,
+    (whole, lead, label, ref, title) => {
+      const target = String(ref).replace(/^<|>$/g, "");
+      if (/^(https?:|data:|mailto:|tel:|#)/i.test(target)) return whole;
+
+      const resolved = resolvePageTarget(target, dir);
+      if (resolved) {
+        rewrittenLinkCount++;
+        return `${lead}[${label}](${resolved}${title})`;
+      }
+
+      // 画像などのアセットは既に処理済みなので、実体があればそのまま残す
+      const bare = target.split(/[?#]/)[0];
+      if (bare && fs.existsSync(path.resolve(dir, bare))) return whole;
+
+      deadLinkCount++;
+      return `${lead}${label}`;
+    }
+  );
+}
+
+function postProcessPages() {
+  for (const pagePath of listOutputPages()) {
+    let text = fs.readFileSync(pagePath, "utf-8");
+
+    // コードブロックは加工対象外
+    const stash = [];
+    text = text.replace(
+      /^(\s*)(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\s*\2[^\n]*$/gm,
+      (b) => (stash.push(b), `\u0000PP${stash.length - 1}\u0000`)
+    );
+    text = text.replace(/(`+)(?:(?!\1)[^\n])+\1/g, (b) => (stash.push(b), `\u0000PP${stash.length - 1}\u0000`));
+
+    text = sanitizeHtmlForEpub(text);
+    text = unlinkDeadLinks(text, pagePath);
+
+    // 退避が入れ子になる場合があるため、残らなくなるまで繰り返し復元する
+    for (let i = 0; i < 10 && text.includes("\u0000PP"); i++) {
+      text = text.replace(/\u0000PP(\d+)\u0000/g, (m, idx) => stash[Number(idx)] ?? m);
+    }
+    if (text.includes("\u0000")) {
+      console.warn(`[警告] 復元しきれない退避が残りました: ${path.relative(OUTPUT_DIR, pagePath)}`);
+      text = text.replace(/\u0000/g, "");
+    }
+    fs.writeFileSync(pagePath, text, "utf-8");
+  }
 }
 
 // ---------- 巨大ページの分割 ----------
@@ -800,24 +974,22 @@ async function main() {
 
   // README.md (表紙代わり)
   const readmeSrc = [
-    "README.md", "README.mdx",
     "index.md", "index.mdx",
+    "README.md", "README.mdx",
     "intro.md", "intro.mdx",
     "introduction.md", "introduction.mdx",
   ]
+    .filter((f) => !EXCLUDE_PATTERNS.includes(f)) // 除外指定したものは表紙にも使わない
     .map((f) => path.join(INPUT_DIR, f))
     .find((p) => fs.existsSync(p));
   if (readmeSrc && !writtenPages.has("README.md")) {
     const readmeRel = path.relative(INPUT_DIR, readmeSrc);
-    fs.writeFileSync(
-      path.join(OUTPUT_DIR, "README.md"),
-      escapeTemplating(
-        rewriteInternalLinks(
-          convertMarkdown(fs.readFileSync(readmeSrc, "utf-8"), readmeRel)
-        )
-      ),
-      "utf-8"
+    const readmeBody = rewriteInternalLinks(
+      convertMarkdown(fs.readFileSync(readmeSrc, "utf-8"), readmeRel)
     );
+    // VitePress のホームは frontmatter のみで本文が空になるため、その場合は題名を出す
+    const cover = readmeBody.trim() ? readmeBody : `# ${TITLE}\n`;
+    fs.writeFileSync(path.join(OUTPUT_DIR, "README.md"), escapeTemplating(cover), "utf-8");
   } else if (!readmeSrc && !writtenPages.has("README.md")) {
     fs.writeFileSync(path.join(OUTPUT_DIR, "README.md"), `# ${TITLE}\n`, "utf-8");
   }
@@ -835,7 +1007,21 @@ async function main() {
     "utf-8"
   );
 
+  postProcessPages();
+
   console.log(`[完了] HonKitプロジェクトを ${OUTPUT_DIR} に生成しました。`);
+  if (droppedSvgCount > 0) {
+    console.log(`[情報] SVG画像 ${droppedSvgCount} 件を代替テキストに置き換えました (--no-svg)。`);
+  }
+  if (rewrittenLinkCount > 0) {
+    console.log(`[情報] 本の中のページへのリンク ${rewrittenLinkCount} 件を相対パスに解決しました。`);
+  }
+  if (deadLinkCount > 0) {
+    console.log(`[情報] 本に含まれないページへのリンク ${deadLinkCount} 件を解除しました。`);
+  }
+  if (strippedTagCount > 0) {
+    console.log(`[情報] EPUBで使えないHTML要素を ${strippedTagCount} ページ分整理しました。`);
+  }
   console.log(`[情報] アセットを ${copiedAssets.size} 件コピーしました。`);
   if (splitPageCount > 0) {
     console.log(

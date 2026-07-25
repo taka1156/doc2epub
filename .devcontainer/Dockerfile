@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   locales \
   calibre \
   python3 \
+  default-jre-headless \
   && rm -rf /var/lib/apt/lists/*
 
 RUN git lfs install
