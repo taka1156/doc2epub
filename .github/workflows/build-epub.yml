@@ -3,7 +3,7 @@ name: Build EPUB
 on:
   # repo.json や変換スクリプトが更新されたら自動ビルド
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "repo.json"
       - "md2honkit.mjs"
