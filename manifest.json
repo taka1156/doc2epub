@@ -1,0 +1,21 @@
+{
+  "generatedAt": "2026-07-25T19:29:10.815Z",
+  "books": [
+    {
+      "name": "vitepress-docs",
+      "file": "vitepress-docs.epub",
+      "size": 406977
+    },
+    {
+      "name": "vite-docs",
+      "file": "vite-docs.epub",
+      "size": 737401
+    }
+  ],
+  "failed": [
+    {
+      "name": "typescript-book",
+      "error": "Command failed: npx honkit epub /home/runner/work/doc2epub/doc2epub/.work/typescript-book/honkit /home/runner/work/doc2epub/doc2epub/dist/typescript-book.epub"
+    }
+  ]
+}
