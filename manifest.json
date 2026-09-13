@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-09-06T18:18:01.099Z",
+  "generatedAt": "2026-09-13T20:32:39.457Z",
   "books": [
     {
       "name": "vitepress-docs",
       "file": "vitepress-docs.epub",
-      "size": 638580
+      "size": 520390
     },
     {
       "name": "vite-docs",
       "file": "vite-docs.epub",
-      "size": 516708
+      "size": 536883
     }
   ],
   "failed": [
